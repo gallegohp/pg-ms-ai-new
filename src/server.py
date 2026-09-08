@@ -1,14 +1,69 @@
 """
 Servidor MCP para PulseGym IA - herramientas de rutina y plan nutricional
 """
-import os
+from src.tools.nutricion import generar_plan_simulado
+from src.tools.rutina import generar_rutina_simulada
+from src.main import TRANSPORT
+from starlette.responses import JSONResponse
+from mcp_types import Request
+from ast import Dict
+from typing import Any
+from mcp.server import MCPServer
 
 from dotenv import load_dotenv
 
 #Cargar variables de entorno
 load_dotenv()
 
-#Configuracion del servidor
-HOST = os.gatenv("MCP_HOST", "127.0.0.1")
-PORT = int(os.getenv("MCP_PORT", "8087"))
-TRANSPORT = os.getenv("MCP_TRANSPORT", "streamable-http").lower().strip()
+def create_server() -> MCPServer:
+    server = MCPServer(
+        name = "PulseGymAISimulator",
+        version = "1.0.0",
+        description = "Servidor MCP simulador de la IA para pruebas con antigravity",
+        instructions = "Este servidor devuelve datos simulados. Pruebas de integracion"
+    )
+
+    # Herramientas: generar_rutinas
+    @server.tool(
+        name="generar_rutina",
+        description=(
+            "generar una rutina de entretenimiento simulada "
+            "Recibe un contexto con datos del socio y devuelve una rutina de ejemplo"
+        ),
+    )
+    async def generar_rutina(contexto: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[MCP tool] generar_rutina llamado para {contexto.get('nombre', 'socio')}")
+        return generar_rutina_simulada(contexto)
+
+    # Herramienta: generar plan nutricional 
+    @server.tool(
+        name="generar_rutina",
+        description=(
+            "generar un plan nutricinal simulado"
+            "recibe un contexto con los datos del socio y devuelve un plan de ejemplo"
+        ),
+    )
+    async def generar_rutina_nutricional(contexto: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[MCP tool] generar_plan_nutricional llamado para {contexto.get('nombre', 'socio')}")
+        return generar_plan_simulado(contexto)
+
+    #ruta de la raiz informativa del servidor
+    @server.custom_route("/", methods=["GET"])
+    async def root_handler(request:Request) -> JSONResponse:
+        return JSONResponse({
+            "name" : server.name,
+            "version" : server.version,
+            "status" : "online",
+            "transport" : TRANSPORT,
+            "endpoints" : {
+                "sse" : "/sse",
+                "messages" : "/messages/",
+                "streamable_http" : "/mcp"
+            },
+            "available_tools": ["generar_rutina", "generar_plan_nutricional"],
+        })
+    return server
+
+def main
+        
+    
