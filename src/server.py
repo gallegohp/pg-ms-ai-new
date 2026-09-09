@@ -1,6 +1,8 @@
 """
 Servidor MCP para PulseGym IA - herramientas de rutina y plan nutricional
 """
+import sys
+from src.main import HOST, PORT
 from src.tools.nutricion import generar_plan_simulado
 from src.tools.rutina import generar_rutina_simulada
 from src.main import TRANSPORT
@@ -14,6 +16,8 @@ from dotenv import load_dotenv
 
 #Cargar variables de entorno
 load_dotenv()
+
+
 
 def create_server() -> MCPServer:
     server = MCPServer(
@@ -64,6 +68,20 @@ def create_server() -> MCPServer:
         })
     return server
 
-def main
-        
+def main():
+    server = create_server()
+    print(f"Iniciando servidor MCP '{server.name}' v{server.version} en http://{HOST}:{PORT} (transporte: {TRANSPORT})...")
+
+    if TRANSPORT == "sse":
+        server.run(transport="sse", host=HOST, port=PORT)
+    elif TRANSPORT == "streamable-http":
+        server.run(transport="streamable-http", host=HOST, port=PORT)
+    elif TRANSPORT == "stdio":
+        server.run(transport="stdio")
+    else:
+        print(f"_____Transporte '{TRANSPORT}' no válido. Opciones: sse, streamable-http, stdio_____")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()  
     
