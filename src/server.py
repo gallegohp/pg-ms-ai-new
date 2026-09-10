@@ -3,6 +3,11 @@ Servidor MCP para PulseGym IA - herramientas de operación del gimnasio.
 
 Expone como herramientas MCP los endpoints del microservicio pg-ms-operation:
 equipos, asistencias y proveedores.
+
+Optimizado para minimizar el consumo de tokens del LLM:
+- Descripciones cortas en las herramientas.
+- Respuestas truncadas a un máximo de items y longitud.
+- Validación de enums en código Python (no en el prompt).
 """
 
 import os
@@ -24,10 +29,41 @@ API_BASE = os.getenv("PULSEGYM_API_BASE", "https://api.pulsegym.uk").rstrip("/")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
 
+# Límites de truncado para reducir tokens enviados al LLM
+MAX_LIST_ITEMS = int(os.getenv("MAX_LIST_ITEMS", "20"))
+MAX_STRING_CHARS = int(os.getenv("MAX_STRING_CHARS", "500"))
+
+# Enums válidos (validados en código, no en el prompt)
+ESTADOS_EQUIPO = {"OPERATIVO", "MANTENIMIENTO", "FUERA_SERVICIO"}
+URGENCIAS_FALLA = {"BAJA", "MEDIA", "ALTA"}
+TIPOS_ACCESO = {"APP", "QR", "MANUAL"}
+
 BASE_HEADERS = {
     "Authorization": f"Bearer {AUTH_TOKEN}",
     "Content-Type": "application/json",
 }
+
+
+# -------------------------------------------------------------
+# Truncado de respuestas
+# -------------------------------------------------------------
+def _truncate(data, depth: int = 0):
+    """Limita el tamaño de las respuestas para no inflar el payload del LLM."""
+    if depth > 5:
+        return "..."
+    if isinstance(data, list):
+        if len(data) > MAX_LIST_ITEMS:
+            return {
+                "_truncated": True,
+                "_total": len(data),
+                "items": [_truncate(i, depth + 1) for i in data[:MAX_LIST_ITEMS]],
+            }
+        return [_truncate(i, depth + 1) for i in data]
+    if isinstance(data, dict):
+        return {k: _truncate(v, depth + 1) for k, v in data.items()}
+    if isinstance(data, str) and len(data) > MAX_STRING_CHARS:
+        return data[:MAX_STRING_CHARS] + "..."
+    return data
 
 
 # -------------------------------------------------------------
@@ -42,27 +78,26 @@ async def _request(method: str, path: str, **kwargs) -> dict:
                 method, url, headers=BASE_HEADERS, **kwargs
             )
     except httpx.RequestError as exc:
-        return {
-            "success": False,
-            "error": f"Error de conexión: {exc}",
-            "url": url,
-        }
+        return {"success": False, "error": f"Error de conexión: {exc}"}
 
     if response.status_code >= 400:
         return {
             "success": False,
             "status": response.status_code,
-            "error": response.text,
-            "url": url,
+            "error": response.text[:MAX_STRING_CHARS],
         }
 
     if not response.content:
         return {"success": True, "status": response.status_code}
 
     try:
-        return response.json()
+        return _truncate(response.json())
     except ValueError:
-        return {"success": True, "status": response.status_code, "raw": response.text}
+        return {
+            "success": True,
+            "status": response.status_code,
+            "raw": response.text[:MAX_STRING_CHARS],
+        }
 
 
 # -------------------------------------------------------------
@@ -71,48 +106,29 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 def create_server() -> FastMCP:
     server = FastMCP(
         name="PulseGymAISimulator",
-        instructions=(
-            "Servidor MCP con herramientas para gestionar equipos, asistencias "
-            "y proveedores del gimnasio PulseGym. Usa estas herramientas cuando "
-            "el usuario pregunte por equipos, fallas, asistencias o proveedores."
-        ),
-        host=HOST,      # ← host va aquí
-        port=PORT,      # ← port va aquí
+        instructions="Herramientas para gestionar equipos, asistencias y proveedores de PulseGym.",
+        host=HOST,
+        port=PORT,
     )
 
     # =====================================================================
     # EQUIPOS
     # =====================================================================
-    @server.tool(
-        name="listar_equipos",
-        description="Lista todos los equipos del gimnasio con su estado operativo.",
-    )
+    @server.tool(name="listar_equipos", description="Lista todos los equipos.")
     async def listar_equipos() -> dict:
-        print("👉 [MCP Tool] listar_equipos")
-        return await _request("GET", "/pg-ms-operation/api/equipos/todos")
+        return await _request("GET", "/pg-ms-operation/api/equipos")
 
-    @server.tool(
-        name="consultar_equipos",
-        description=(
-            "Consulta el inventario de equipos filtrando por estado. "
-            "Estados válidos: OPERATIVO, MANTENIMIENTO, FUERA_SERVICIO."
-        ),
-    )
+    @server.tool(name="consultar_equipos", description="Filtra equipos por estado.")
     async def consultar_equipos(estado: str) -> dict:
-        print(f"👉 [MCP Tool] consultar_equipos(estado={estado})")
+        if estado not in ESTADOS_EQUIPO:
+            return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
         return await _request(
             "POST",
             "/pg-ms-operation/api/equipos/consultar",
             json={"estado": estado},
         )
 
-    @server.tool(
-        name="actualizar_equipo",
-        description=(
-            "Actualiza todos los datos de un equipo existente. "
-            "Requiere enviar el objeto completo del equipo."
-        ),
-    )
+    @server.tool(name="actualizar_equipo", description="Actualiza un equipo completo.")
     async def actualizar_equipo(
         id: int,
         idProveedor: int,
@@ -126,7 +142,8 @@ def create_server() -> FastMCP:
         ubicacion: str,
         estado: str,
     ) -> dict:
-        print(f"👉 [MCP Tool] actualizar_equipo(id={id})")
+        if estado not in ESTADOS_EQUIPO:
+            return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
         body = {
             "idProveedor": idProveedor,
             "idSede": idSede,
@@ -139,23 +156,16 @@ def create_server() -> FastMCP:
             "ubicacion": ubicacion,
             "estado": estado,
         }
-        return await _request(
-            "PUT", f"/pg-ms-operation/api/equipos/{id}", json=body
-        )
+        return await _request("PUT", f"/pg-ms-operation/api/equipos/{id}", json=body)
 
-    @server.tool(
-        name="reportar_falla_equipo",
-        description=(
-            "Reporta una falla en un equipo. "
-            "Urgencias válidas: BAJA, MEDIA, ALTA."
-        ),
-    )
+    @server.tool(name="reportar_falla_equipo", description="Reporta falla de un equipo.")
     async def reportar_falla_equipo(
         idEquipo: int,
         urgencia: str,
         descripcion: str,
     ) -> dict:
-        print(f"👉 [MCP Tool] reportar_falla_equipo(idEquipo={idEquipo})")
+        if urgencia not in URGENCIAS_FALLA:
+            return {"success": False, "error": f"Urgencia inválida. Válidas: {sorted(URGENCIAS_FALLA)}"}
         body = {"urgencia": urgencia, "descripcion": descripcion}
         return await _request(
             "POST",
@@ -163,114 +173,70 @@ def create_server() -> FastMCP:
             json=body,
         )
 
-    @server.tool(
-        name="listar_reportes_falla",
-        description="Consulta todas las fallas reportadas en los equipos.",
-    )
+    @server.tool(name="listar_reportes_falla", description="Lista reportes de fallas.")
     async def listar_reportes_falla() -> dict:
-        print("👉 [MCP Tool] listar_reportes_falla")
-        return await _request(
-            "GET", "/pg-ms-operation/api/equipos/reportes-falla"
-        )
+        return await _request("GET", "/pg-ms-operation/api/equipos/reportes-falla")
 
     # =====================================================================
     # ASISTENCIAS
     # =====================================================================
-    @server.tool(
-        name="registrar_entrada",
-        description=(
-            "Registra la entrada de un usuario al gimnasio. "
-            "Tipos de acceso válidos: APP, QR, MANUAL."
-        ),
-    )
+    @server.tool(name="registrar_entrada", description="Registra entrada de usuario.")
     async def registrar_entrada(
         idUsuario: int,
         idSede: int,
         tipoAcceso: str,
     ) -> dict:
-        print(f"👉 [MCP Tool] registrar_entrada(idUsuario={idUsuario})")
+        if tipoAcceso not in TIPOS_ACCESO:
+            return {"success": False, "error": f"TipoAcceso inválido. Válidos: {sorted(TIPOS_ACCESO)}"}
         body = {
             "idUsuario": idUsuario,
             "idSede": idSede,
             "tipoAcceso": tipoAcceso,
         }
-        return await _request(
-            "POST", "/pg-ms-operation/api/asistencias/entrada", json=body
-        )
+        return await _request("POST", "/pg-ms-operation/api/asistencias/entrada", json=body)
 
-    @server.tool(
-        name="historial_asistencia_usuario",
-        description="Consulta el historial de asistencias de un usuario por su ID.",
-    )
+    @server.tool(name="historial_asistencia_usuario", description="Historial de asistencias de un usuario.")
     async def historial_asistencia_usuario(idUsuario: int) -> dict:
-        print(f"👉 [MCP Tool] historial_asistencia_usuario(idUsuario={idUsuario})")
         return await _request(
             "GET",
             f"/pg-ms-operation/api/asistencias/historial/usuario/{idUsuario}",
         )
 
-    @server.tool(
-        name="asistencia_por_sede",
-        description="Consulta las asistencias registradas en una sede específica.",
-    )
+    @server.tool(name="asistencia_por_sede", description="Asistencias de una sede.")
     async def asistencia_por_sede(idSede: int) -> dict:
-        print(f"👉 [MCP Tool] asistencia_por_sede(idSede={idSede})")
-        return await _request(
-            "GET", f"/pg-ms-operation/api/asistencias/sede/{idSede}"
-        )
+        return await _request("GET", f"/pg-ms-operation/api/asistencias/sede/{idSede}")
 
-    @server.tool(
-        name="asistencia_hoy",
-        description="Consulta las asistencias registradas hoy.",
-    )
+    @server.tool(name="asistencia_hoy", description="Asistencias de hoy.")
     async def asistencia_hoy() -> dict:
-        print("👉 [MCP Tool] asistencia_hoy")
         return await _request("GET", "/pg-ms-operation/api/asistencias/hoy")
 
     # =====================================================================
     # PROVEEDORES
     # =====================================================================
-    @server.tool(
-        name="registrar_proveedor",
-        description="Registra un nuevo proveedor en el sistema.",
-    )
+    @server.tool(name="registrar_proveedor", description="Registra proveedor.")
     async def registrar_proveedor(
         nombreEmpresa: str,
         contactoNombre: str,
         telefono: str,
         email: str,
     ) -> dict:
-        print(f"👉 [MCP Tool] registrar_proveedor({nombreEmpresa})")
         body = {
             "nombreEmpresa": nombreEmpresa,
             "contactoNombre": contactoNombre,
             "telefono": telefono,
             "email": email,
         }
-        return await _request(
-            "POST", "/pg-ms-operation/api/proveedores/registrar", json=body
-        )
+        return await _request("POST", "/pg-ms-operation/api/proveedores/registrar", json=body)
 
-    @server.tool(
-        name="listar_proveedores",
-        description="Lista todos los proveedores registrados.",
-    )
+    @server.tool(name="listar_proveedores", description="Lista proveedores.")
     async def listar_proveedores() -> dict:
-        print("👉 [MCP Tool] listar_proveedores")
         return await _request("GET", "/pg-ms-operation/api/proveedores/todos")
 
-    @server.tool(
-        name="obtener_proveedor",
-        description="Obtiene los datos de un proveedor por su ID.",
-    )
+    @server.tool(name="obtener_proveedor", description="Obtiene proveedor por ID.")
     async def obtener_proveedor(id: int) -> dict:
-        print(f"👉 [MCP Tool] obtener_proveedor(id={id})")
         return await _request("GET", f"/pg-ms-operation/api/proveedores/{id}")
 
-    @server.tool(
-        name="actualizar_proveedor",
-        description="Actualiza los datos de un proveedor existente.",
-    )
+    @server.tool(name="actualizar_proveedor", description="Actualiza proveedor.")
     async def actualizar_proveedor(
         id: int,
         nombreEmpresa: str,
@@ -278,23 +244,16 @@ def create_server() -> FastMCP:
         telefono: str,
         email: str,
     ) -> dict:
-        print(f"👉 [MCP Tool] actualizar_proveedor(id={id})")
         body = {
             "nombreEmpresa": nombreEmpresa,
             "contactoNombre": contactoNombre,
             "telefono": telefono,
             "email": email,
         }
-        return await _request(
-            "PUT", f"/pg-ms-operation/api/proveedores/{id}", json=body
-        )
+        return await _request("PUT", f"/pg-ms-operation/api/proveedores/{id}", json=body)
 
-    @server.tool(
-        name="eliminar_proveedor",
-        description="Elimina un proveedor por su ID.",
-    )
+    @server.tool(name="eliminar_proveedor", description="Elimina proveedor por ID.")
     async def eliminar_proveedor(id: int) -> dict:
-        print(f"👉 [MCP Tool] eliminar_proveedor(id={id})")
         return await _request("DELETE", f"/pg-ms-operation/api/proveedores/{id}")
 
     return server
@@ -309,10 +268,7 @@ def main():
     print(f"🌐 Backend PulseGym: {API_BASE}")
 
     server = create_server()
-    print(
-        f"Iniciando servidor MCP '{server.name}' en "
-        f"http://{HOST}:{PORT} (transporte: {TRANSPORT})..."
-    )
+    print(f"Iniciando servidor MCP '{server.name}' en http://{HOST}:{PORT} (transporte: {TRANSPORT})...")
 
     if TRANSPORT == "sse":
         server.run(transport="sse")
@@ -321,10 +277,7 @@ def main():
     elif TRANSPORT == "stdio":
         server.run(transport="stdio")
     else:
-        print(
-            f"_____Transporte '{TRANSPORT}' no válido. "
-            f"Opciones: sse, streamable-http, stdio_____"
-        )
+        print(f"_____Transporte '{TRANSPORT}' no válido. Opciones: sse, streamable-http, stdio_____")
         sys.exit(1)
 
 
