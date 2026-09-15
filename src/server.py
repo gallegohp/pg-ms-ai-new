@@ -4,15 +4,13 @@ Servidor MCP para PulseGym IA - herramientas de operación del gimnasio.
 Expone como herramientas MCP los endpoints del microservicio pg-ms-operation:
 equipos, asistencias y proveedores.
 
-Optimizado para minimizar el consumo de tokens del LLM:
-- Descripciones cortas en las herramientas.
-- Respuestas truncadas a un máximo de items y longitud.
-- Validación de enums en código Python (no en el prompt).
+Optimizado para minimizar el consumo de tokens del LLM.
 """
 
 import os
 import sys
 
+from typing import Optional   # añade esto arriba del archivo
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -29,14 +27,18 @@ API_BASE = os.getenv("PULSEGYM_API_BASE", "https://api.pulsegym.uk").rstrip("/")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
 
-# Límites de truncado para reducir tokens enviados al LLM
 MAX_LIST_ITEMS = int(os.getenv("MAX_LIST_ITEMS", "20"))
 MAX_STRING_CHARS = int(os.getenv("MAX_STRING_CHARS", "500"))
 
-# Enums válidos (validados en código, no en el prompt)
-ESTADOS_EQUIPO = {"OPERATIVO", "MANTENIMIENTO", "FUERA_SERVICIO"}
-URGENCIAS_FALLA = {"BAJA", "MEDIA", "ALTA"}
+# Enums reales del backend (EnumEstado y EnumUrgencia)
+ESTADOS_EQUIPO = {"OPERATIVO", "MANTENIMIENTO", "FUERA_DE_SERVICIO", "RETIRADO"}
+URGENCIAS_FALLA = {"BAJA", "MEDIA", "ALTA", "CRITICA"}
 TIPOS_ACCESO = {"APP", "QR", "MANUAL"}
+
+# Texto de enums para meter en las descripciones de las tools
+_ENUM_ESTADOS = ", ".join(sorted(ESTADOS_EQUIPO))
+_ENUM_URGENCIAS = ", ".join(sorted(URGENCIAS_FALLA))
+_ENUM_ACCESOS = ", ".join(sorted(TIPOS_ACCESO))
 
 BASE_HEADERS = {
     "Authorization": f"Bearer {AUTH_TOKEN}",
@@ -45,10 +47,9 @@ BASE_HEADERS = {
 
 
 # -------------------------------------------------------------
-# Truncado de respuestas
+# Truncado
 # -------------------------------------------------------------
 def _truncate(data, depth: int = 0):
-    """Limita el tamaño de las respuestas para no inflar el payload del LLM."""
     if depth > 5:
         return "..."
     if isinstance(data, list):
@@ -67,10 +68,9 @@ def _truncate(data, depth: int = 0):
 
 
 # -------------------------------------------------------------
-# Cliente HTTP con manejo de errores uniforme
+# Cliente HTTP
 # -------------------------------------------------------------
 async def _request(method: str, path: str, **kwargs) -> dict:
-    """Ejecuta una petición al backend y normaliza la respuesta."""
     url = f"{API_BASE}{path}"
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
@@ -114,21 +114,77 @@ def create_server() -> FastMCP:
     # =====================================================================
     # EQUIPOS
     # =====================================================================
-    @server.tool(name="listar_equipos", description="Lista todos los equipos.")
-    async def listar_equipos() -> dict:
-        return await _request("GET", "/pg-ms-operation/api/equipos")
+    # NOTA: `dummy` no se usa. Existe para que el esquema JSON incluya
+    # `properties`, que Groq exige en herramientas sin parámetros.
 
-    @server.tool(name="consultar_equipos", description="Filtra equipos por estado.")
-    async def consultar_equipos(estado: str) -> dict:
-        if estado not in ESTADOS_EQUIPO:
+    @server.tool(name="listar_equipos", description="Lista todos los equipos (id, nombre, estado).")
+    async def listar_equipos(dummy: str = "") -> dict:
+        return await _request("GET", "/pg-ms-operation/api/equipos/todos")
+
+    @server.tool(
+    name="consultar_equipos",
+    description=(
+        "Filtra equipos por nombre, marca, ubicación, sede o estado. "
+        f"Estados válidos: {_ENUM_ESTADOS}."
+    ),
+)
+    async def consultar_equipos(
+        nombre: Optional[str] = None,
+        marca: Optional[str] = None,
+        ubicacion: Optional[str] = None,
+        idSede: Optional[int] = None,
+        estado: Optional[str] = None,
+    ) -> dict:
+        body = {}
+        if nombre:
+            body["nombre"] = nombre
+        if marca:
+            body["marca"] = marca
+        if ubicacion:
+            body["ubicacion"] = ubicacion
+        if idSede:
+            body["idSede"] = idSede
+        if estado:
+            estado_up = estado.upper()
+            if estado_up not in ESTADOS_EQUIPO:
+                return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
+            body["estado"] = estado_up
+        return await _request("POST", "/pg-ms-operation/api/equipos/consultar", json=body)
+
+    @server.tool(
+        name="contar_equipos_por_estado",
+        description=f"Cuenta equipos en un estado. Válidos: {_ENUM_ESTADOS}.",
+    )
+    async def contar_equipos_por_estado(estado: str) -> dict:
+        estado_up = estado.upper()
+        if estado_up not in ESTADOS_EQUIPO:
+            return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
+        return await _request("GET", f"/pg-ms-operation/api/equipos/conteo?estado={estado_up}")
+
+    @server.tool(
+        name="cambiar_estado_equipo",
+        description=(
+            "Cambia SOLO el estado de un equipo. Úsalo cuando el usuario quiera "
+            f"cambiar únicamente el estado. Válidos: {_ENUM_ESTADOS}."
+        ),
+    )
+    async def cambiar_estado_equipo(id: int, estado: str) -> dict:
+        estado_up = estado.upper()
+        if estado_up not in ESTADOS_EQUIPO:
             return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
         return await _request(
-            "POST",
-            "/pg-ms-operation/api/equipos/consultar",
-            json={"estado": estado},
+            "PATCH",
+            f"/pg-ms-operation/api/equipos/{id}/estado",
+            json={"estado": estado_up},
         )
 
-    @server.tool(name="actualizar_equipo", description="Actualiza un equipo completo.")
+    @server.tool(
+        name="actualizar_equipo",
+        description=(
+            "Actualiza TODOS los campos de un equipo. Requiere enviar el objeto completo. "
+            f"El estado debe ser uno de: {_ENUM_ESTADOS}."
+        ),
+    )
     async def actualizar_equipo(
         id: int,
         idProveedor: int,
@@ -142,7 +198,8 @@ def create_server() -> FastMCP:
         ubicacion: str,
         estado: str,
     ) -> dict:
-        if estado not in ESTADOS_EQUIPO:
+        estado_up = estado.upper()
+        if estado_up not in ESTADOS_EQUIPO:
             return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
         body = {
             "idProveedor": idProveedor,
@@ -154,19 +211,19 @@ def create_server() -> FastMCP:
             "fechaAdquisicion": fechaAdquisicion,
             "fechaGarantia": fechaGarantia,
             "ubicacion": ubicacion,
-            "estado": estado,
+            "estado": estado_up,
         }
         return await _request("PUT", f"/pg-ms-operation/api/equipos/{id}", json=body)
 
-    @server.tool(name="reportar_falla_equipo", description="Reporta falla de un equipo.")
-    async def reportar_falla_equipo(
-        idEquipo: int,
-        urgencia: str,
-        descripcion: str,
-    ) -> dict:
-        if urgencia not in URGENCIAS_FALLA:
+    @server.tool(
+        name="reportar_falla_equipo",
+        description=f"Reporta falla de un equipo. Urgencias válidas: {_ENUM_URGENCIAS}.",
+    )
+    async def reportar_falla_equipo(idEquipo: int, urgencia: str, descripcion: str) -> dict:
+        urgencia_up = urgencia.upper()
+        if urgencia_up not in URGENCIAS_FALLA:
             return {"success": False, "error": f"Urgencia inválida. Válidas: {sorted(URGENCIAS_FALLA)}"}
-        body = {"urgencia": urgencia, "descripcion": descripcion}
+        body = {"urgencia": urgencia_up, "descripcion": descripcion}
         return await _request(
             "POST",
             f"/pg-ms-operation/api/equipos/{idEquipo}/reportar-falla",
@@ -174,62 +231,45 @@ def create_server() -> FastMCP:
         )
 
     @server.tool(name="listar_reportes_falla", description="Lista reportes de fallas.")
-    async def listar_reportes_falla() -> dict:
+    async def listar_reportes_falla(dummy: str = "") -> dict:
         return await _request("GET", "/pg-ms-operation/api/equipos/reportes-falla")
 
     # =====================================================================
     # ASISTENCIAS
     # =====================================================================
-    @server.tool(name="registrar_entrada", description="Registra entrada de usuario.")
-    async def registrar_entrada(
-        idUsuario: int,
-        idSede: int,
-        tipoAcceso: str,
-    ) -> dict:
-        if tipoAcceso not in TIPOS_ACCESO:
+    @server.tool(
+        name="registrar_entrada",
+        description=f"Registra entrada de usuario. Tipos de acceso: {_ENUM_ACCESOS}.",
+    )
+    async def registrar_entrada(idUsuario: int, idSede: int, tipoAcceso: str) -> dict:
+        tipo_up = tipoAcceso.upper()
+        if tipo_up not in TIPOS_ACCESO:
             return {"success": False, "error": f"TipoAcceso inválido. Válidos: {sorted(TIPOS_ACCESO)}"}
-        body = {
-            "idUsuario": idUsuario,
-            "idSede": idSede,
-            "tipoAcceso": tipoAcceso,
-        }
+        body = {"idUsuario": idUsuario, "idSede": idSede, "tipoAcceso": tipo_up}
         return await _request("POST", "/pg-ms-operation/api/asistencias/entrada", json=body)
 
     @server.tool(name="historial_asistencia_usuario", description="Historial de asistencias de un usuario.")
     async def historial_asistencia_usuario(idUsuario: int) -> dict:
-        return await _request(
-            "GET",
-            f"/pg-ms-operation/api/asistencias/historial/usuario/{idUsuario}",
-        )
+        return await _request("GET", f"/pg-ms-operation/api/asistencias/historial/usuario/{idUsuario}")
 
     @server.tool(name="asistencia_por_sede", description="Asistencias de una sede.")
     async def asistencia_por_sede(idSede: int) -> dict:
         return await _request("GET", f"/pg-ms-operation/api/asistencias/sede/{idSede}")
 
     @server.tool(name="asistencia_hoy", description="Asistencias de hoy.")
-    async def asistencia_hoy() -> dict:
+    async def asistencia_hoy(dummy: str = "") -> dict:
         return await _request("GET", "/pg-ms-operation/api/asistencias/hoy")
 
     # =====================================================================
     # PROVEEDORES
     # =====================================================================
     @server.tool(name="registrar_proveedor", description="Registra proveedor.")
-    async def registrar_proveedor(
-        nombreEmpresa: str,
-        contactoNombre: str,
-        telefono: str,
-        email: str,
-    ) -> dict:
-        body = {
-            "nombreEmpresa": nombreEmpresa,
-            "contactoNombre": contactoNombre,
-            "telefono": telefono,
-            "email": email,
-        }
+    async def registrar_proveedor(nombreEmpresa: str, contactoNombre: str, telefono: str, email: str) -> dict:
+        body = {"nombreEmpresa": nombreEmpresa, "contactoNombre": contactoNombre, "telefono": telefono, "email": email}
         return await _request("POST", "/pg-ms-operation/api/proveedores/registrar", json=body)
 
     @server.tool(name="listar_proveedores", description="Lista proveedores.")
-    async def listar_proveedores() -> dict:
+    async def listar_proveedores(dummy: str = "") -> dict:
         return await _request("GET", "/pg-ms-operation/api/proveedores/todos")
 
     @server.tool(name="obtener_proveedor", description="Obtiene proveedor por ID.")
@@ -237,19 +277,8 @@ def create_server() -> FastMCP:
         return await _request("GET", f"/pg-ms-operation/api/proveedores/{id}")
 
     @server.tool(name="actualizar_proveedor", description="Actualiza proveedor.")
-    async def actualizar_proveedor(
-        id: int,
-        nombreEmpresa: str,
-        contactoNombre: str,
-        telefono: str,
-        email: str,
-    ) -> dict:
-        body = {
-            "nombreEmpresa": nombreEmpresa,
-            "contactoNombre": contactoNombre,
-            "telefono": telefono,
-            "email": email,
-        }
+    async def actualizar_proveedor(id: int, nombreEmpresa: str, contactoNombre: str, telefono: str, email: str) -> dict:
+        body = {"nombreEmpresa": nombreEmpresa, "contactoNombre": contactoNombre, "telefono": telefono, "email": email}
         return await _request("PUT", f"/pg-ms-operation/api/proveedores/{id}", json=body)
 
     @server.tool(name="eliminar_proveedor", description="Elimina proveedor por ID.")
