@@ -38,3 +38,7 @@ env/
 */.venv/
 */env/
 IPYNB_FILES/
+
+# Bytecode compilado de Python
+__pycache__/
+*.pyc
