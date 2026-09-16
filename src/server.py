@@ -5,12 +5,20 @@ Expone como herramientas MCP los endpoints del microservicio pg-ms-operation:
 equipos, asistencias y proveedores.
 
 Optimizado para minimizar el consumo de tokens del LLM.
+
+Autenticación:
+- Auto-login contra pg-ms-auth usando MCP_SERVICE_EMAIL / MCP_SERVICE_PASSWORD.
+- El JWT se renueva automáticamente cuando está por expirar (o al recibir 401).
 """
 
 import os
 import sys
+import time
+import json
+import base64
+import asyncio
 
-from typing import Optional   # añade esto arriba del archivo
+from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -20,14 +28,21 @@ from mcp.server.fastmcp import FastMCP
 # -------------------------------------------------------------
 load_dotenv()
 
-HOST = os.getenv("HOST", "0.0.0.0")   
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
 TRANSPORT = os.getenv("TRANSPORT", "sse").lower().strip()
 API_BASE = os.getenv("PULSEGYM_API_BASE", "https://api.pulsegym.uk").rstrip("/")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
 
 MAX_LIST_ITEMS = int(os.getenv("MAX_LIST_ITEMS", "20"))
 MAX_STRING_CHARS = int(os.getenv("MAX_STRING_CHARS", "500"))
+
+# -------------------------------------------------------------
+# Credenciales de servicio (auto-login)
+# -------------------------------------------------------------
+MCP_SERVICE_EMAIL = os.getenv("MCP_SERVICE_EMAIL", "")
+MCP_SERVICE_PASSWORD = os.getenv("MCP_SERVICE_PASSWORD", "")
+AUTH_LOGIN_PATH = os.getenv("AUTH_LOGIN_PATH", "/pg-ms-auth/auth/login")
 
 # Enums reales del backend (EnumEstado y EnumUrgencia)
 ESTADOS_EQUIPO = {"OPERATIVO", "MANTENIMIENTO", "FUERA_DE_SERVICIO", "RETIRADO"}
@@ -38,11 +53,6 @@ TIPOS_ACCESO = {"APP", "QR", "MANUAL"}
 _ENUM_ESTADOS = ", ".join(sorted(ESTADOS_EQUIPO))
 _ENUM_URGENCIAS = ", ".join(sorted(URGENCIAS_FALLA))
 _ENUM_ACCESOS = ", ".join(sorted(TIPOS_ACCESO))
-
-BASE_HEADERS = {
-    "Authorization": f"Bearer {AUTH_TOKEN}",
-    "Content-Type": "application/json",
-}
 
 
 # -------------------------------------------------------------
@@ -67,18 +77,124 @@ def _truncate(data, depth: int = 0):
 
 
 # -------------------------------------------------------------
+# TokenManager: auto-login y renovación automática del JWT
+# -------------------------------------------------------------
+class TokenManager:
+    """
+    Gestiona el JWT de servicio contra pg-ms-auth.
+    - Login inicial con email/password.
+    - Renueva cuando faltan < 30s para expirar.
+    - Reintenta con re-login forzado si un request devuelve 401.
+    """
+
+    def __init__(self):
+        self._token: Optional[str] = None
+        self._exp: int = 0
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _decode_exp(jwt: str) -> int:
+        """Lee `exp` del payload del JWT sin verificar firma."""
+        try:
+            payload_b64 = jwt.split(".")[1]
+            padding = "=" * (-len(payload_b64) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+            return int(data.get("exp", 0))
+        except Exception:
+            return 0
+
+    async def _do_login(self) -> str:
+        if not MCP_SERVICE_EMAIL or not MCP_SERVICE_PASSWORD:
+            raise RuntimeError(
+                "Faltan MCP_SERVICE_EMAIL / MCP_SERVICE_PASSWORD en el entorno."
+            )
+
+        url = f"{API_BASE}{AUTH_LOGIN_PATH}"
+        body = {"email": MCP_SERVICE_EMAIL, "password": MCP_SERVICE_PASSWORD}
+
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            resp = await client.post(url, json=body)
+
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Login falló ({resp.status_code}): {resp.text[:300]}"
+            )
+
+        data = resp.json()
+
+        token = (
+            (data.get("data") or {}).get("jwt")
+            or data.get("jwt")
+            or data.get("token")
+            or data.get("accessToken")
+            or data.get("access_token")
+        )
+        if not token:
+            raise RuntimeError(
+                f"Login OK pero no se encontró el JWT. Keys: {list(data.keys())}"
+            )
+
+        self._token = token
+        self._exp = self._decode_exp(token)
+
+        exp_str = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._exp))
+            if self._exp else "desconocido"
+        )
+        print(f"🔐 Login OK. Token expira: {exp_str}")
+        return token
+
+    async def get_token(self, force_refresh: bool = False) -> str:
+        async with self._lock:
+            now = int(time.time())
+            needs_refresh = (
+                force_refresh
+                or not self._token
+                or (self._exp and now >= (self._exp - 30))
+            )
+            if needs_refresh:
+                await self._do_login()
+            return self._token
+
+
+TOKEN_MGR = TokenManager()
+
+
+# -------------------------------------------------------------
 # Cliente HTTP
 # -------------------------------------------------------------
 async def _request(method: str, path: str, **kwargs) -> dict:
     url = f"{API_BASE}{path}"
+
+    # 1. Obtener token (login automático si hace falta)
+    try:
+        token = await TOKEN_MGR.get_token()
+    except Exception as exc:
+        return {"success": False, "error": f"Error de autenticación: {exc}"}
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    # 2. Primer intento
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            response = await client.request(
-                method, url, headers=BASE_HEADERS, **kwargs
-            )
+            response = await client.request(method, url, headers=headers, **kwargs)
     except httpx.RequestError as exc:
         return {"success": False, "error": f"Error de conexión: {exc}"}
 
+    # 3. Si 401 → re-login forzado y reintentar UNA vez
+    if response.status_code == 401:
+        try:
+            token = await TOKEN_MGR.get_token(force_refresh=True)
+            headers["Authorization"] = f"Bearer {token}"
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                response = await client.request(method, url, headers=headers, **kwargs)
+        except Exception as exc:
+            return {"success": False, "error": f"Re-login falló: {exc}"}
+
+    # 4. Manejo normal
     if response.status_code >= 400:
         return {
             "success": False,
@@ -121,12 +237,12 @@ def create_server() -> FastMCP:
         return await _request("GET", "/pg-ms-operation/api/equipos/todos")
 
     @server.tool(
-    name="consultar_equipos",
-    description=(
-        "Filtra equipos por nombre, marca, ubicación, sede o estado. "
-        f"Estados válidos: {_ENUM_ESTADOS}."
-    ),
-)
+        name="consultar_equipos",
+        description=(
+            "Filtra equipos por nombre, marca, ubicación, sede o estado. "
+            f"Estados válidos: {_ENUM_ESTADOS}."
+        ),
+    )
     async def consultar_equipos(
         nombre: Optional[str] = None,
         marca: Optional[str] = None,
@@ -176,6 +292,43 @@ def create_server() -> FastMCP:
             f"/pg-ms-operation/api/equipos/{id}/estado",
             json={"estado": estado_up},
         )
+
+    @server.tool(
+        name="crear_equipo",
+        description=(
+            "Crea un nuevo equipo en el sistema. "
+            "Fechas en formato YYYY-MM-DD. "
+            f"El estado debe ser uno de: {_ENUM_ESTADOS}."
+        ),
+    )
+    async def crear_equipo(
+        idProveedor: int,
+        idSede: int,
+        nombre: str,
+        marca: str,
+        modelo: str,
+        numeroSerie: str,
+        fechaAdquisicion: str,
+        fechaGarantia: str,
+        ubicacion: str,
+        estado: str,
+    ) -> dict:
+        estado_up = estado.upper()
+        if estado_up not in ESTADOS_EQUIPO:
+            return {"success": False, "error": f"Estado inválido. Válidos: {sorted(ESTADOS_EQUIPO)}"}
+        body = {
+            "idProveedor": idProveedor,
+            "idSede": idSede,
+            "nombre": nombre,
+            "marca": marca,
+            "modelo": modelo,
+            "numeroSerie": numeroSerie,
+            "fechaAdquisicion": fechaAdquisicion,
+            "fechaGarantia": fechaGarantia,
+            "ubicacion": ubicacion,
+            "estado": estado_up,
+        }
+        return await _request("POST", "/pg-ms-operation/api/equipos", json=body)
 
     @server.tool(
         name="actualizar_equipo",
@@ -291,9 +444,10 @@ def create_server() -> FastMCP:
 # Entry point
 # -------------------------------------------------------------
 def main():
-    if not AUTH_TOKEN:
-        print("⚠️  AUTH_TOKEN vacío: las llamadas al backend fallarán con 401.")
+    if not MCP_SERVICE_EMAIL or not MCP_SERVICE_PASSWORD:
+        print("⚠️  MCP_SERVICE_EMAIL / MCP_SERVICE_PASSWORD vacíos: el auto-login fallará.")
     print(f"🌐 Backend PulseGym: {API_BASE}")
+    print(f"🔑 Login endpoint: {API_BASE}{AUTH_LOGIN_PATH}")
 
     server = create_server()
     print(f"Iniciando servidor MCP '{server.name}' en http://{HOST}:{PORT} (transporte: {TRANSPORT})...")
