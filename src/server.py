@@ -412,6 +412,44 @@ def create_server() -> FastMCP:
     async def asistencia_hoy(dummy: str = "") -> dict:
         return await _request("GET", "/pg-ms-operation/api/asistencias/hoy")
 
+    @server.tool(
+        name="consultar_asistencias",
+        description=(
+            "Consulta asistencias filtrando por usuario o por sede. "
+            "Sin filtros, devuelve las asistencias de hoy."
+        ),
+    )
+    async def consultar_asistencias(
+        idUsuario: Optional[int] = None,
+        idSede: Optional[int] = None,
+    ) -> dict:
+        if idUsuario:
+            return await _request("GET", f"/pg-ms-operation/api/asistencias/historial/usuario/{idUsuario}")
+        if idSede:
+            return await _request("GET", f"/pg-ms-operation/api/asistencias/sede/{idSede}")
+        return await _request("GET", "/pg-ms-operation/api/asistencias/hoy")
+
+    @server.tool(
+        name="contar_asistencias_por_fecha",
+        description=(
+            "Cuenta asistencias registradas hoy, opcionalmente filtradas por sede. "
+            "Limitación actual del backend: solo soporta el conteo del día de hoy, "
+            "no rangos de fecha arbitrarios."
+        ),
+    )
+    async def contar_asistencias_por_fecha(idSede: Optional[int] = None) -> dict:
+        path = (
+            f"/pg-ms-operation/api/asistencias/sede/{idSede}"
+            if idSede
+            else "/pg-ms-operation/api/asistencias/hoy"
+        )
+        data = await _request("GET", path)
+        if isinstance(data, dict) and "_total" in data:
+            return {"total": data["_total"]}
+        if isinstance(data, list):
+            return {"total": len(data)}
+        return data
+
     # =====================================================================
     # PROVEEDORES
     # =====================================================================
@@ -424,6 +462,17 @@ def create_server() -> FastMCP:
     async def listar_proveedores(dummy: str = "") -> dict:
         return await _request("GET", "/pg-ms-operation/api/proveedores/todos")
 
+    @server.tool(
+        name="consultar_proveedores",
+        description="Consulta proveedores por nombre de empresa (búsqueda parcial). Sin filtro, devuelve todos.",
+    )
+    async def consultar_proveedores(nombreEmpresa: Optional[str] = None) -> dict:
+        if nombreEmpresa:
+            return await _request(
+                "GET", "/pg-ms-operation/api/proveedores/buscar", params={"nombre": nombreEmpresa}
+            )
+        return await _request("GET", "/pg-ms-operation/api/proveedores/todos")
+
     @server.tool(name="obtener_proveedor", description="Obtiene proveedor por ID.")
     async def obtener_proveedor(id: int) -> dict:
         return await _request("GET", f"/pg-ms-operation/api/proveedores/{id}")
@@ -432,7 +481,6 @@ def create_server() -> FastMCP:
     async def actualizar_proveedor(id: int, nombreEmpresa: str, contactoNombre: str, telefono: str, email: str) -> dict:
         body = {"nombreEmpresa": nombreEmpresa, "contactoNombre": contactoNombre, "telefono": telefono, "email": email}
         return await _request("PUT", f"/pg-ms-operation/api/proveedores/{id}", json=body)
-
     @server.tool(name="eliminar_proveedor", description="Elimina proveedor por ID.")
     async def eliminar_proveedor(id: int) -> dict:
         return await _request("DELETE", f"/pg-ms-operation/api/proveedores/{id}")
