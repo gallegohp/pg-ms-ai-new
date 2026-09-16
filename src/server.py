@@ -20,8 +20,7 @@ from mcp.server.fastmcp import FastMCP
 # -------------------------------------------------------------
 load_dotenv()
 
-HOST = os.getenv("HOST", "127.0.0.1")
-PORT = int(os.getenv("PORT", "8000"))
+HOST = os.getenv("HOST", "0.0.0.0")   
 TRANSPORT = os.getenv("TRANSPORT", "sse").lower().strip()
 API_BASE = os.getenv("PULSEGYM_API_BASE", "https://api.pulsegym.uk").rstrip("/")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
