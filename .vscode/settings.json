@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "/home/camil/proyecto_mcp/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "/home/camil/proyecto_mcp/.venv/lib/python3.14/site-packages"
+  ],
+  "python.pythonPath": "/home/camil/proyecto_mcp/.venv/bin/python"
+}
