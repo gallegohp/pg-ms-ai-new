@@ -1,7 +1,5 @@
 """Tools MCP de equipos (pg-ms-operation)."""
 
-from typing import Optional
-
 from mcp.server.fastmcp import FastMCP
 
 from ..config import ENUM_ESTADOS, ENUM_URGENCIAS, ESTADOS_EQUIPO, URGENCIAS_FALLA
@@ -11,6 +9,14 @@ from ..http_client import request
 def register(server: FastMCP) -> None:
     # NOTA: `dummy` no se usa. Existe para que el esquema JSON incluya
     # `properties`, que Groq exige en herramientas sin parámetros.
+    #
+    # NOTA: los parámetros opcionales usan sentinels ("" / 0) en vez de
+    # `Optional[X] = None`. Groq valida el tipo de cada argumento contra
+    # el schema, y si el modelo manda `null` en un campo declarado como
+    # "string" (no nullable), la API entera devuelve 400 y el agente
+    # termina sin poder usar ninguna tool. Con un tipo simple y no nulo,
+    # el modelo manda "" en vez de null y todo el resto del código ya
+    # trata ambos como "no viene" (`if nombre:` es falsy para "" y None).
 
     @server.tool(name="listar_equipos", description="Lista todos los equipos (id, nombre, estado).")
     async def listar_equipos(dummy: str = "") -> dict:
@@ -24,11 +30,11 @@ def register(server: FastMCP) -> None:
         ),
     )
     async def consultar_equipos(
-        nombre: Optional[str] = None,
-        marca: Optional[str] = None,
-        ubicacion: Optional[str] = None,
-        idSede: Optional[int] = None,
-        estado: Optional[str] = None,
+        nombre: str = "",
+        marca: str = "",
+        ubicacion: str = "",
+        idSede: int = 0,
+        estado: str = "",
     ) -> dict:
         body = {}
         if nombre:

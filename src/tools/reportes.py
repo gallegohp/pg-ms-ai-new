@@ -6,10 +6,15 @@ NOTA: "ingresos" aquí es dinero (pagos/membresías), no confundir con
 Estos endpoints exigen rol Admin (ingresos/mora) o Admin/Recepcionista
 (afluencia) en la cuenta de servicio del MCP; si esa cuenta no tiene el
 rol adecuado, el backend responde 403.
+
+Los parámetros de fecha opcionales usan "" como sentinel en vez de
+`Optional[str] = None`: Groq valida el tipo de cada argumento del tool
+call contra el schema, y si el modelo manda `null` en un campo
+declarado como "string" (no nullable), la API entera devuelve 400 y el
+agente se queda sin poder usar ninguna tool en ese turno.
 """
 
 from datetime import date
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -21,7 +26,7 @@ def register(server: FastMCP) -> None:
         name="reporte_ingresos_diarios",
         description="Total de ingresos (dinero) de un día. Sin fecha, usa hoy. Requiere rol Admin.",
     )
-    async def reporte_ingresos_diarios(fecha: Optional[str] = None) -> dict:
+    async def reporte_ingresos_diarios(fecha: str = "") -> dict:
         fecha_str = fecha or date.today().isoformat()
         return await request(
             "GET", "/pg-ms-reports/api/reportes/ingresos/diarios", params={"fecha": fecha_str}
@@ -70,7 +75,7 @@ def register(server: FastMCP) -> None:
             "dos fechas (YYYY-MM-DD). Sin fechas, trae todos. Requiere rol Admin."
         ),
     )
-    async def reporte_mora(fechaInicio: Optional[str] = None, fechaFin: Optional[str] = None) -> dict:
+    async def reporte_mora(fechaInicio: str = "", fechaFin: str = "") -> dict:
         params = {}
         if fechaInicio:
             params["fechaInicio"] = fechaInicio
@@ -96,7 +101,7 @@ def register(server: FastMCP) -> None:
             "o Recepcionista."
         ),
     )
-    async def reporte_afluencia_por_dia(fecha: Optional[str] = None) -> dict:
+    async def reporte_afluencia_por_dia(fecha: str = "") -> dict:
         fecha_str = fecha or date.today().isoformat()
         return await request(
             "GET",

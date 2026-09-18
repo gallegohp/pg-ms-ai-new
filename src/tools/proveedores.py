@@ -1,7 +1,5 @@
 """Tools MCP de proveedores (pg-ms-operation)."""
 
-from typing import Optional
-
 from mcp.server.fastmcp import FastMCP
 
 from ..http_client import request
@@ -21,7 +19,7 @@ def register(server: FastMCP) -> None:
         name="consultar_proveedores",
         description="Consulta proveedores por nombre de empresa (búsqueda parcial). Sin filtro, devuelve todos.",
     )
-    async def consultar_proveedores(nombreEmpresa: Optional[str] = None) -> dict:
+    async def consultar_proveedores(nombreEmpresa: str = "") -> dict:
         if nombreEmpresa:
             return await request(
                 "GET", "/pg-ms-operation/api/proveedores/buscar", params={"nombre": nombreEmpresa}

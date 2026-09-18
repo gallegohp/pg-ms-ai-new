@@ -1,7 +1,5 @@
 """Tools MCP de asistencias (pg-ms-operation)."""
 
-from typing import Optional
-
 from mcp.server.fastmcp import FastMCP
 
 from ..config import ENUM_ACCESOS, TIPOS_ACCESO
@@ -40,8 +38,8 @@ def register(server: FastMCP) -> None:
         ),
     )
     async def consultar_asistencias(
-        idUsuario: Optional[int] = None,
-        idSede: Optional[int] = None,
+        idUsuario: int = 0,
+        idSede: int = 0,
     ) -> dict:
         if idUsuario:
             return await request("GET", f"/pg-ms-operation/api/asistencias/historial/usuario/{idUsuario}")
@@ -57,7 +55,7 @@ def register(server: FastMCP) -> None:
             "no rangos de fecha arbitrarios."
         ),
     )
-    async def contar_asistencias_por_fecha(idSede: Optional[int] = None) -> dict:
+    async def contar_asistencias_por_fecha(idSede: int = 0) -> dict:
         path = (
             f"/pg-ms-operation/api/asistencias/sede/{idSede}"
             if idSede
